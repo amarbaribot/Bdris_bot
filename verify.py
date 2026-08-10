@@ -5,8 +5,8 @@ import requests
 from bs4 import BeautifulSoup
 from flask import Flask
 from threading import Thread
-import time
 import logging
+import time
 
 # ============ লগিং সেটআপ ============
 logging.basicConfig(level=logging.INFO)
@@ -74,11 +74,8 @@ def get_initial_tokens():
         logger.warning("⚠️ No verification token found")
         return None
         
-    except requests.exceptions.RequestException as e:
-        logger.error(f"❌ Connection error: {e}")
-        return None
     except Exception as e:
-        logger.error(f"❌ Unexpected error: {e}")
+        logger.error(f"❌ Token error: {e}")
         return None
 
 # ============ জন্ম সনদ যাচাই ফাংশন ============
@@ -86,7 +83,7 @@ def verify_birth_certificate(ubrn, dob):
     try:
         token = get_initial_tokens()
         if not token:
-            return "⚠️ সার্ভার থেকে টোকেন সংগ্রহ করা যায়নি। দয়া করে কিছুক্ষণ পর চেষ্টা করুন।"
+            return "⚠️ সার্ভার থেকে টোকেন সংগ্রহ করা যায়নি। দয়া করে কিছুক্ষণ পর চেষ্টা করুন।", None
 
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
@@ -116,75 +113,82 @@ def verify_birth_certificate(ubrn, dob):
         
         logger.info(f"📡 Response status: {response.status_code}")
         
-        if response.status_code == 200:
-            response_text = response.text.lower()
+        # ⚠️ রেসপন্সের সম্পূর্ণ HTML লগ করুন (ডিবাগের জন্য)
+        logger.info(f"📄 Response length: {len(response.text)} characters")
+        
+        # ⚠️ চেক করুন: রেসপন্সে "Not Match" আছে কিনা
+        response_lower = response.text.lower()
+        
+        # 🚨 সবচেয়ে গুরুত্বপূর্ণ: Not Match চেক করুন
+        if "not match" in response_lower or "মিলেনি" in response_lower or "সঠিক নয়" in response_lower:
+            logger.info("❌ Not Match detected")
+            return "❌ **Not Match**\n\nআপনার প্রদত্ত তথ্যের সাথে কোনো জন্ম সনদ মিলেনি।\n\n💡 সম্ভাব্য কারণ:\n• UBRN নম্বর ভুল\n• জন্ম তারিখ ভুল\n• সনদটি ডাটাবেসে নেই", None
+        
+        # ✅ Match চেক করুন
+        if any(keyword in response_lower for keyword in ['মিলেছে', 'পাওয়া গেছে', 'found', 'match', 'সঠিক']):
+            logger.info("✅ Match detected")
             
-            # ⚠️ "Not Match" চেক আগে করতে হবে
-            if "not match" in response_text or "মিলেনি" in response_text:
-                return "❌ **Not Match**\n\nআপনার প্রদত্ত তথ্যের সাথে কোনো জন্ম সনদ মিলেনি।\n\n💡 সম্ভাব্য কারণ:\n• UBRN নম্বর ভুল\n• জন্ম তারিখ ভুল\n• সনদটি এখনও ডিজিটাল ডাটাবেসে আপডেট হয়নি"
+            soup = BeautifulSoup(response.text, 'html.parser')
             
-            if any(keyword in response_text for keyword in ['মিলেছে', 'পাওয়া গেছে', 'found', 'match', 'certificate', 'নিবন্ধন']):
-                soup = BeautifulSoup(response.text, 'html.parser')
-                
-                # নাম খোঁজা
-                name = "খুঁজে পাওয়া যায়নি"
-                name_patterns = [
-                    soup.find('td', string=re.compile(r'নাম|Name', re.I)),
-                    soup.find('th', string=re.compile(r'নাম|Name', re.I)),
-                    soup.find('td', string='নাম :'),
-                    soup.find('td', string='Name :')
-                ]
-                
-                for pattern in name_patterns:
-                    if pattern:
-                        value_tag = pattern.find_next('td')
-                        if value_tag:
-                            name = value_tag.get_text(strip=True)
-                            break
-                        value_tag = pattern.find_next('th')
-                        if value_tag:
-                            name = value_tag.get_text(strip=True)
-                            break
-                
-                # পিতা ও মাতার নাম খোঁজা
-                father = "খুঁজে পাওয়া যায়নি"
-                mother = "খুঁজে পাওয়া যায়নি"
-                
-                father_tag = soup.find('td', string=re.compile(r'পিতা|Father', re.I))
-                if father_tag:
-                    val = father_tag.find_next('td')
-                    if val:
-                        father = val.get_text(strip=True)
-                
-                mother_tag = soup.find('td', string=re.compile(r'মাতা|Mother', re.I))
-                if mother_tag:
-                    val = mother_tag.find_next('td')
-                    if val:
-                        mother = val.get_text(strip=True)
-                
-                return f"""✅ **জন্ম সনদ সঠিক!** 🎉
-
-👤 **নাম:** {name}
-👨 **পিতা:** {father}
-👩 **মাতা:** {mother}
-📋 **UBRN:** {ubrn}
-📅 **জন্ম তারিখ:** {dob}
-
-✅ তথ্য যাচাইকৃত।"""
+            # তথ্য সংগ্রহ
+            name = "খুঁজে পাওয়া যায়নি"
+            father = "খুঁজে পাওয়া যায়নি"
+            mother = "খুঁজে পাওয়া যায়নি"
             
-            # যদি কোনো কিছুর সাথে মিল না পায়
-            return "⚠️ **সার্ভার থেকে অস্পষ্ট উত্তর পাওয়া গেছে।**\n\nআপনার তথ্য আবার যাচাই করে দেখুন।"
-        else:
-            return f"⚠️ সার্ভার ত্রুটি (স্ট্যাটাস: {response.status_code})। দয়া করে পরে চেষ্টা করুন।"
+            # নাম খোঁজা
+            name_patterns = [
+                soup.find('td', string=re.compile(r'নাম', re.I)),
+                soup.find('td', string=re.compile(r'Name', re.I)),
+                soup.find('th', string=re.compile(r'নাম', re.I)),
+                soup.find('th', string=re.compile(r'Name', re.I))
+            ]
             
-    except requests.exceptions.Timeout:
-        return "⏰ সার্ভার থেকে উত্তর আসতে সময় বেশি লাগছে। দয়া করে আবার চেষ্টা করুন।"
-    except requests.exceptions.RequestException as e:
-        logger.error(f"❌ Request error: {e}")
-        return f"⚠️ সংযোগ সমস্যা: {str(e)}"
+            for pattern in name_patterns:
+                if pattern:
+                    # next td বা th খোঁজা
+                    next_elem = pattern.find_next('td')
+                    if not next_elem:
+                        next_elem = pattern.find_next('th')
+                    if next_elem:
+                        name = next_elem.get_text(strip=True)
+                        break
+            
+            # পিতা খোঁজা
+            father_tag = soup.find('td', string=re.compile(r'পিতা|Father', re.I))
+            if father_tag:
+                next_elem = father_tag.find_next('td')
+                if not next_elem:
+                    next_elem = father_tag.find_next('th')
+                if next_elem:
+                    father = next_elem.get_text(strip=True)
+            
+            # মাতা খোঁজা
+            mother_tag = soup.find('td', string=re.compile(r'মাতা|Mother', re.I))
+            if mother_tag:
+                next_elem = mother_tag.find_next('td')
+                if not next_elem:
+                    next_elem = mother_tag.find_next('th')
+                if next_elem:
+                    mother = next_elem.get_text(strip=True)
+            
+            # তথ্য সংরক্ষণ
+            info = {
+                'name': name,
+                'father': father,
+                'mother': mother,
+                'ubrn': ubrn,
+                'dob': dob
+            }
+            
+            return "✅ **জন্ম সনদ সঠিক!** 🎉", info
+        
+        # যদি কিছুই না পাওয়া যায়
+        logger.warning("⚠️ Unknown response format")
+        return "⚠️ **সার্ভার থেকে অস্পষ্ট উত্তর পাওয়া গেছে।**\n\nদয়া করে আবার চেষ্টা করুন।", None
+            
     except Exception as e:
-        logger.error(f"❌ Unexpected error: {e}")
-        return f"⚠️ অজানা ত্রুটি: {str(e)}"
+        logger.error(f"❌ Verification error: {e}")
+        return f"⚠️ ত্রুটি: {str(e)}", None
 
 # ============ টেলিগ্রাম কমান্ড হ্যান্ডলার ============
 @bot.message_handler(commands=['start', 'help'])
@@ -228,19 +232,35 @@ def verify_command(message):
             bot.reply_to(message, "⚠️ UBRN নম্বর **১৭ অঙ্কের** হতে হবে।")
             return
         
-        if len(ubrn) > 17:
-            ubrn = ubrn[:17]
-            
         processing_msg = bot.reply_to(message, "⏳ **যাচাই করা হচ্ছে...** দয়া করে অপেক্ষা করুন।", parse_mode='Markdown')
         
-        result = verify_birth_certificate(ubrn, dob)
+        result, info = verify_birth_certificate(ubrn, dob)
         
-        bot.edit_message_text(
-            result, 
-            chat_id=message.chat.id, 
-            message_id=processing_msg.message_id,
-            parse_mode='Markdown'
-        )
+        if info:
+            # সঠিক তথ্য পাওয়া গেলে বিস্তারিত দেখান
+            response_text = f"""✅ **জন্ম সনদ সঠিক!** 🎉
+
+👤 **নাম:** {info['name']}
+👨 **পিতা:** {info['father']}
+👩 **মাতা:** {info['mother']}
+📋 **UBRN:** {info['ubrn']}
+📅 **জন্ম তারিখ:** {info['dob']}
+
+✅ তথ্য যাচাইকৃত।"""
+            bot.edit_message_text(
+                response_text, 
+                chat_id=message.chat.id, 
+                message_id=processing_msg.message_id,
+                parse_mode='Markdown'
+            )
+        else:
+            # Not Match বা ত্রুটি
+            bot.edit_message_text(
+                result, 
+                chat_id=message.chat.id, 
+                message_id=processing_msg.message_id,
+                parse_mode='Markdown'
+            )
         
     except Exception as e:
         logger.error(f"❌ Command error: {e}")
