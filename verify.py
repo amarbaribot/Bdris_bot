@@ -1,4 +1,5 @@
 import os
+import re
 import telebot
 import requests
 from bs4 import BeautifulSoup
@@ -11,7 +12,7 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ============ ওয়েব সার্ভার (Render-এর পোর্ট সমস্যা সমাধানে) ============
+# ============ ওয়েব সার্ভার ============
 app = Flask(__name__)
 
 @app.route('/')
@@ -34,7 +35,7 @@ if not BOT_TOKEN:
     raise ValueError("⚠️ BOT_TOKEN environment variable is not set!")
 
 bot = telebot.TeleBot(BOT_TOKEN)
-bot.remove_webhook()  # Webhook সরিয়ে Polling ব্যবহারের জন্য
+bot.remove_webhook()
 
 # ============ ওয়েবসাইট কনফিগারেশন ============
 BASE_URL = "https://everify.bdris.gov.bd"
@@ -59,14 +60,12 @@ def get_initial_tokens():
         
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # টোকেন খোঁজা
         token_input = soup.find('input', {'name': '__RequestVerificationToken'})
         if token_input:
             token = token_input.get('value')
             logger.info("✅ Verification token collected successfully")
             return token
         
-        # অথবা কুকি থেকে টোকেন খোঁজা
         for cookie in session.cookies:
             if cookie.name == '__RequestVerificationToken':
                 logger.info("✅ Token found in cookies")
@@ -85,7 +84,6 @@ def get_initial_tokens():
 # ============ জন্ম সনদ যাচাই ফাংশন ============
 def verify_birth_certificate(ubrn, dob):
     try:
-        # টোকেন সংগ্রহ
         token = get_initial_tokens()
         if not token:
             return "⚠️ সার্ভার থেকে টোকেন সংগ্রহ করা যায়নি। দয়া করে কিছুক্ষণ পর চেষ্টা করুন।"
@@ -119,22 +117,63 @@ def verify_birth_certificate(ubrn, dob):
         logger.info(f"📡 Response status: {response.status_code}")
         
         if response.status_code == 200:
-            # সফল রেসপন্স চেক
             response_text = response.text.lower()
             
+            # ⚠️ "Not Match" চেক আগে করতে হবে
+            if "not match" in response_text or "মিলেনি" in response_text:
+                return "❌ **Not Match**\n\nআপনার প্রদত্ত তথ্যের সাথে কোনো জন্ম সনদ মিলেনি।\n\n💡 সম্ভাব্য কারণ:\n• UBRN নম্বর ভুল\n• জন্ম তারিখ ভুল\n• সনদটি এখনও ডিজিটাল ডাটাবেসে আপডেট হয়নি"
+            
             if any(keyword in response_text for keyword in ['মিলেছে', 'পাওয়া গেছে', 'found', 'match', 'certificate', 'নিবন্ধন']):
-                # নাম ইত্যাদি বের করার চেষ্টা
                 soup = BeautifulSoup(response.text, 'html.parser')
-                name_tag = soup.find('td', string=re.compile(r'নাম|Name', re.I))
-                if name_tag:
-                    value_tag = name_tag.find_next('td')
-                    if value_tag:
-                        name = value_tag.get_text(strip=True)
-                        return f"✅ **জন্ম সনদ সঠিক!**\n\n👤 নাম: {name}\n\n💡 তথ্য যাচাইকৃত।"
                 
-                return "✅ **Birth Certificate Ok**\n\nআপনার জন্ম সনদ সঠিক।"
-            else:
-                return "❌ **Not Match**\n\nআপনার প্রদত্ত তথ্যের সাথে কোনো জন্ম সনদ মিলেনি।"
+                # নাম খোঁজা
+                name = "খুঁজে পাওয়া যায়নি"
+                name_patterns = [
+                    soup.find('td', string=re.compile(r'নাম|Name', re.I)),
+                    soup.find('th', string=re.compile(r'নাম|Name', re.I)),
+                    soup.find('td', string='নাম :'),
+                    soup.find('td', string='Name :')
+                ]
+                
+                for pattern in name_patterns:
+                    if pattern:
+                        value_tag = pattern.find_next('td')
+                        if value_tag:
+                            name = value_tag.get_text(strip=True)
+                            break
+                        value_tag = pattern.find_next('th')
+                        if value_tag:
+                            name = value_tag.get_text(strip=True)
+                            break
+                
+                # পিতা ও মাতার নাম খোঁজা
+                father = "খুঁজে পাওয়া যায়নি"
+                mother = "খুঁজে পাওয়া যায়নি"
+                
+                father_tag = soup.find('td', string=re.compile(r'পিতা|Father', re.I))
+                if father_tag:
+                    val = father_tag.find_next('td')
+                    if val:
+                        father = val.get_text(strip=True)
+                
+                mother_tag = soup.find('td', string=re.compile(r'মাতা|Mother', re.I))
+                if mother_tag:
+                    val = mother_tag.find_next('td')
+                    if val:
+                        mother = val.get_text(strip=True)
+                
+                return f"""✅ **জন্ম সনদ সঠিক!** 🎉
+
+👤 **নাম:** {name}
+👨 **পিতা:** {father}
+👩 **মাতা:** {mother}
+📋 **UBRN:** {ubrn}
+📅 **জন্ম তারিখ:** {dob}
+
+✅ তথ্য যাচাইকৃত।"""
+            
+            # যদি কোনো কিছুর সাথে মিল না পায়
+            return "⚠️ **সার্ভার থেকে অস্পষ্ট উত্তর পাওয়া গেছে।**\n\nআপনার তথ্য আবার যাচাই করে দেখুন।"
         else:
             return f"⚠️ সার্ভার ত্রুটি (স্ট্যাটাস: {response.status_code})। দয়া করে পরে চেষ্টা করুন।"
             
@@ -172,7 +211,6 @@ def send_welcome(message):
 @bot.message_handler(commands=['verify'])
 def verify_command(message):
     try:
-        # কমান্ড থেকে ডেটা আলাদা করা
         parts = message.text.split(maxsplit=2)
         
         if len(parts) != 3:
@@ -186,22 +224,17 @@ def verify_command(message):
         ubrn = parts[1].strip()
         dob = parts[2].strip()
         
-        # মৌলিক যাচাই
         if len(ubrn) != 17 or not ubrn.isdigit():
             bot.reply_to(message, "⚠️ UBRN নম্বর **১৭ অঙ্কের** হতে হবে।")
             return
         
-        # যদি UBRN ১৭ অঙ্কের না হয়
         if len(ubrn) > 17:
-            ubrn = ubrn[:17]  # প্রথম ১৭ অঙ্ক নিন
+            ubrn = ubrn[:17]
             
-        # প্রক্রিয়াকরণ শুরু
         processing_msg = bot.reply_to(message, "⏳ **যাচাই করা হচ্ছে...** দয়া করে অপেক্ষা করুন।", parse_mode='Markdown')
         
-        # যাচাই করুন
         result = verify_birth_certificate(ubrn, dob)
         
-        # উত্তর দিন
         bot.edit_message_text(
             result, 
             chat_id=message.chat.id, 
@@ -224,16 +257,13 @@ def echo_all(message):
 if __name__ == '__main__':
     logger.info("🚀 BDRIS Bot starting...")
     
-    # ওয়েব সার্ভার চালু (Render-এর জন্য)
     web_thread = Thread(target=run_web_server, daemon=True)
     web_thread.start()
     logger.info(f"🌐 Web server running on port {os.environ.get('PORT', 5000)}")
     
-    # বট চালু
     logger.info("🤖 Bot polling started...")
     
     try:
-        # পোলিং শুরু
         bot.infinity_polling(timeout=60, long_polling_timeout=30)
     except KeyboardInterrupt:
         logger.info("👋 Bot stopped by user")
