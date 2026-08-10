@@ -7,6 +7,7 @@ from flask import Flask
 from threading import Thread
 import logging
 import time
+from urllib.parse import urljoin
 
 # ============ লগিং সেটআপ ============
 logging.basicConfig(level=logging.INFO)
@@ -39,11 +40,20 @@ bot.remove_webhook()
 
 # ============ ওয়েবসাইট কনফিগারেশন ============
 BASE_URL = "https://everify.bdris.gov.bd"
-VERIFY_URL = "https://everify.bdris.gov.bd/UBRNVerification/Search"
+
+# ⚠️ বিভিন্ন সম্ভাব্য URL (যেকোনো একটি কাজ করবে)
+POSSIBLE_URLS = [
+    "/UBRNVerification/Search",
+    "/Home/Verify",
+    "/Verify",
+    "/UBRNVerification/Verify",
+    "/Search",
+    "/"
+]
 
 session = requests.Session()
 
-# ============ টোকেন সংগ্রহ ফাংশন ============
+# ============ হোমপেজ থেকে টোকেন সংগ্রহ ============
 def get_initial_tokens():
     try:
         headers = {
@@ -60,10 +70,11 @@ def get_initial_tokens():
         
         soup = BeautifulSoup(response.text, 'html.parser')
         
+        # টোকেন খোঁজা
         token_input = soup.find('input', {'name': '__RequestVerificationToken'})
         if token_input:
             token = token_input.get('value')
-            logger.info("✅ Verification token collected successfully")
+            logger.info("✅ Verification token collected")
             return token
         
         for cookie in session.cookies:
@@ -71,126 +82,123 @@ def get_initial_tokens():
                 logger.info("✅ Token found in cookies")
                 return cookie.value
         
-        logger.warning("⚠️ No verification token found")
         return None
         
     except Exception as e:
         logger.error(f"❌ Token error: {e}")
         return None
 
-# ============ জন্ম সনদ যাচাই ফাংশন ============
+# ============ সব URL ট্রাই করে দেখা ============
+def try_all_urls(ubrn, dob, token):
+    for url_path in POSSIBLE_URLS:
+        try:
+            full_url = urljoin(BASE_URL, url_path)
+            logger.info(f"🔍 Trying URL: {full_url}")
+            
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9,bn;q=0.8",
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Origin": BASE_URL,
+                "Referer": BASE_URL + "/",
+                "Connection": "keep-alive",
+            }
+
+            data = {
+                "__RequestVerificationToken": token,
+                "UBRN": ubrn,
+                "DOB": dob
+            }
+
+            response = session.post(
+                full_url, 
+                headers=headers, 
+                data=data, 
+                allow_redirects=True,
+                timeout=30
+            )
+            
+            logger.info(f"📡 URL: {url_path} → Status: {response.status_code}")
+            
+            if response.status_code == 200:
+                return response, full_url
+                
+        except Exception as e:
+            logger.warning(f"⚠️ URL {url_path} failed: {e}")
+            continue
+    
+    return None, None
+
+# ============ জন্ম সনদ যাচাই ============
 def verify_birth_certificate(ubrn, dob):
     try:
+        # টোকেন সংগ্রহ
         token = get_initial_tokens()
         if not token:
             return "⚠️ সার্ভার থেকে টোকেন সংগ্রহ করা যায়নি। দয়া করে কিছুক্ষণ পর চেষ্টা করুন।", None
 
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9,bn;q=0.8",
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Origin": BASE_URL,
-            "Referer": BASE_URL + "/",
-            "Connection": "keep-alive",
-        }
-
-        data = {
-            "__RequestVerificationToken": token,
-            "UBRN": ubrn,
-            "DOB": dob
-        }
-
-        logger.info(f"🔍 Verifying UBRN: {ubrn}, DOB: {dob}")
+        # সব URL ট্রাই করুন
+        response, working_url = try_all_urls(ubrn, dob, token)
         
-        response = session.post(
-            VERIFY_URL, 
-            headers=headers, 
-            data=data, 
-            allow_redirects=True,
-            timeout=30
-        )
+        if not response:
+            return "⚠️ সার্ভারে সংযোগ করা যাচ্ছে না। দয়া করে পরে চেষ্টা করুন।", None
         
-        logger.info(f"📡 Response status: {response.status_code}")
+        logger.info(f"✅ Working URL: {working_url}")
+        logger.info(f"📄 Response length: {len(response.text)}")
         
-        # ⚠️ রেসপন্সের সম্পূর্ণ HTML লগ করুন (ডিবাগের জন্য)
-        logger.info(f"📄 Response length: {len(response.text)} characters")
-        
-        # ⚠️ চেক করুন: রেসপন্সে "Not Match" আছে কিনা
+        # রেসপন্স চেক
         response_lower = response.text.lower()
         
-        # 🚨 সবচেয়ে গুরুত্বপূর্ণ: Not Match চেক করুন
+        # 🚨 Not Match চেক
         if "not match" in response_lower or "মিলেনি" in response_lower or "সঠিক নয়" in response_lower:
             logger.info("❌ Not Match detected")
             return "❌ **Not Match**\n\nআপনার প্রদত্ত তথ্যের সাথে কোনো জন্ম সনদ মিলেনি।\n\n💡 সম্ভাব্য কারণ:\n• UBRN নম্বর ভুল\n• জন্ম তারিখ ভুল\n• সনদটি ডাটাবেসে নেই", None
         
-        # ✅ Match চেক করুন
+        # ✅ Match চেক
         if any(keyword in response_lower for keyword in ['মিলেছে', 'পাওয়া গেছে', 'found', 'match', 'সঠিক']):
             logger.info("✅ Match detected")
             
             soup = BeautifulSoup(response.text, 'html.parser')
             
             # তথ্য সংগ্রহ
-            name = "খুঁজে পাওয়া যায়নি"
-            father = "খুঁজে পাওয়া যায়নি"
-            mother = "খুঁজে পাওয়া যায়নি"
+            info = {'name': 'খুঁজে পাওয়া যায়নি', 'father': 'খুঁজে পাওয়া যায়নি', 'mother': 'খুঁজে পাওয়া যায়নি'}
             
             # নাম খোঁজা
-            name_patterns = [
-                soup.find('td', string=re.compile(r'নাম', re.I)),
-                soup.find('td', string=re.compile(r'Name', re.I)),
-                soup.find('th', string=re.compile(r'নাম', re.I)),
-                soup.find('th', string=re.compile(r'Name', re.I))
-            ]
-            
+            name_patterns = soup.find_all(['td', 'th'], string=re.compile(r'নাম|Name', re.I))
             for pattern in name_patterns:
-                if pattern:
-                    # next td বা th খোঁজা
-                    next_elem = pattern.find_next('td')
-                    if not next_elem:
-                        next_elem = pattern.find_next('th')
-                    if next_elem:
-                        name = next_elem.get_text(strip=True)
-                        break
+                next_elem = pattern.find_next(['td', 'th'])
+                if next_elem:
+                    info['name'] = next_elem.get_text(strip=True)
+                    break
             
-            # পিতা খোঁজা
-            father_tag = soup.find('td', string=re.compile(r'পিতা|Father', re.I))
+            # পিতা
+            father_tag = soup.find(['td', 'th'], string=re.compile(r'পিতা|Father', re.I))
             if father_tag:
-                next_elem = father_tag.find_next('td')
-                if not next_elem:
-                    next_elem = father_tag.find_next('th')
+                next_elem = father_tag.find_next(['td', 'th'])
                 if next_elem:
-                    father = next_elem.get_text(strip=True)
+                    info['father'] = next_elem.get_text(strip=True)
             
-            # মাতা খোঁজা
-            mother_tag = soup.find('td', string=re.compile(r'মাতা|Mother', re.I))
+            # মাতা
+            mother_tag = soup.find(['td', 'th'], string=re.compile(r'মাতা|Mother', re.I))
             if mother_tag:
-                next_elem = mother_tag.find_next('td')
-                if not next_elem:
-                    next_elem = mother_tag.find_next('th')
+                next_elem = mother_tag.find_next(['td', 'th'])
                 if next_elem:
-                    mother = next_elem.get_text(strip=True)
+                    info['mother'] = next_elem.get_text(strip=True)
             
-            # তথ্য সংরক্ষণ
-            info = {
-                'name': name,
-                'father': father,
-                'mother': mother,
-                'ubrn': ubrn,
-                'dob': dob
-            }
+            info['ubrn'] = ubrn
+            info['dob'] = dob
             
             return "✅ **জন্ম সনদ সঠিক!** 🎉", info
         
-        # যদি কিছুই না পাওয়া যায়
-        logger.warning("⚠️ Unknown response format")
+        # কোনো নির্দিষ্ট উত্তর না পেলে
         return "⚠️ **সার্ভার থেকে অস্পষ্ট উত্তর পাওয়া গেছে।**\n\nদয়া করে আবার চেষ্টা করুন।", None
             
     except Exception as e:
         logger.error(f"❌ Verification error: {e}")
         return f"⚠️ ত্রুটি: {str(e)}", None
 
-# ============ টেলিগ্রাম কমান্ড হ্যান্ডলার ============
+# ============ টেলিগ্রাম কমান্ড ============
 @bot.message_handler(commands=['start', 'help'])
 def send_welcome(message):
     welcome_text = """🎯 **BDRIS জন্ম সনদ যাচাই বট** 🇧🇩
@@ -232,12 +240,11 @@ def verify_command(message):
             bot.reply_to(message, "⚠️ UBRN নম্বর **১৭ অঙ্কের** হতে হবে।")
             return
         
-        processing_msg = bot.reply_to(message, "⏳ **যাচাই করা হচ্ছে...** দয়া করে অপেক্ষা করুন।", parse_mode='Markdown')
+        processing_msg = bot.reply_to(message, "⏳ **যাচাই করা হচ্ছে...**", parse_mode='Markdown')
         
         result, info = verify_birth_certificate(ubrn, dob)
         
         if info:
-            # সঠিক তথ্য পাওয়া গেলে বিস্তারিত দেখান
             response_text = f"""✅ **জন্ম সনদ সঠিক!** 🎉
 
 👤 **নাম:** {info['name']}
@@ -247,20 +254,15 @@ def verify_command(message):
 📅 **জন্ম তারিখ:** {info['dob']}
 
 ✅ তথ্য যাচাইকৃত।"""
-            bot.edit_message_text(
-                response_text, 
-                chat_id=message.chat.id, 
-                message_id=processing_msg.message_id,
-                parse_mode='Markdown'
-            )
         else:
-            # Not Match বা ত্রুটি
-            bot.edit_message_text(
-                result, 
-                chat_id=message.chat.id, 
-                message_id=processing_msg.message_id,
-                parse_mode='Markdown'
-            )
+            response_text = result
+        
+        bot.edit_message_text(
+            response_text, 
+            chat_id=message.chat.id, 
+            message_id=processing_msg.message_id,
+            parse_mode='Markdown'
+        )
         
     except Exception as e:
         logger.error(f"❌ Command error: {e}")
@@ -273,7 +275,7 @@ def echo_all(message):
         "📌 সাহায্যের জন্য `/help` বা `/start` লিখুন।\n"
         "📌 জন্ম সনদ যাচাই করতে `/verify UBRN তারিখ` লিখুন।")
 
-# ============ মেইন ফাংশন ============
+# ============ মেইন ============
 if __name__ == '__main__':
     logger.info("🚀 BDRIS Bot starting...")
     
